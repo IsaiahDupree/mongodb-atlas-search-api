@@ -1,0 +1,38 @@
+# Docker Compose for MongoDB Atlas Search API
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mongodb-atlas-search-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app
+    environment:
+      - MONGODB_URI=mongodb://mongodb:27017/productdb
+      - API_KEY=${API_KEY:-dev_api_key_12345}
+      - PYTHONUNBUFFERED=1
+      - TEST_MODE=true
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb-atlas-search-db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: always
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]  
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongodb_data:

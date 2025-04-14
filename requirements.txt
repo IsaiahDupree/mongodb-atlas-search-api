@@ -1,0 +1,11 @@
+fastapi==0.95.0
+uvicorn==0.21.1
+motor==3.1.2
+pymongo==4.3.3
+pydantic==1.10.7
+sentence-transformers==2.2.2
+python-dotenv==1.0.0
+httpx==0.24.0
+numpy==1.24.3
+torch==2.0.0
+transformers==4.28.1

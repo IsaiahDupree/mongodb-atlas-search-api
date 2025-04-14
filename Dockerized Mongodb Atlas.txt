@@ -1,0 +1,68 @@
+I need a backend-coder and docker intermediate or pro to help me make this project:
+
+Objectives:
+Obj1: Make a Search and ingest API infront of MongoDb Atlas Search with knnBeta enabled.
+
+Obj2: Be able to use vector search to search 10000 products and return a faceted resultset. The set will be used from a Ecom-search-results page.
+
+Obj3: The search and Ingest api should use a LOCAL(!no time for an extra api hop!)  embeddingsmodel to generate embeddings for product.title and product.description and store that in the mongoDb along with the product-documents.
+
+Obj4:  Able to ingest salesdata being orderlines with the folowing info;  Orderline fields: [orderNr, ProductNr, CustomerNr, SeasonName, DateTime]
+This data should be used to generate "Product recommendations ala "Users who bought X also bought these products" (See attached chatGpt chat)
+
+Obj5: Authorize access to API via a shared secret om request header value "x-apikey". Don't overengineer. just check if the value is correct as set in some proj-configfile.
+
+** Implementation requirements: **
+Configure MongoDB and Python Fastcgi on one shared container.
+
+About the data:
+The product data will be in norwegian and swedish. This means we will use a vector model that works good with those languages when generating embeddings: paraphrase-multilingual-MiniLM-L12-v2
+
+Main fields of product json:
+id:"prod1",
+title:"This is product",
+description: "Nice description",
+brand:"Nice brand",
+imageThumbnailUrl:""
+priceOriginal:234, // undiscounted price
+priceCurrent:123, // current price is nice
+isOnSale:true,// cool, it's on discount
+ageFrom:1
+ageTo:3
+ageBucket: "1 to 3 years"  // typical filtering bucket
+color: "red"
+seasons: ["winter", "spring"]  //when is this product relevant, maybe used for boosting
+productType: "main" //main, part, extras
+seasonRelevancyFactor: 0.4 // 0 to 1 used for boosting
+stockLevel:123 //yes currently in stock
+
+Endpoints we need:
+    POST /ingestProducts: Accepts product or content data, preprocesses (decompounds, embeds, etc.), and writes to the
+search backend.
+
+    POST /ingestOrderline: Accepts orderline data for relevancy/similarity search
+
+    POST /search: Accepts user query, embeds it, runs a combined keyword + vector search, and returns ranked results.
+
+    POST /autosuggest: Lighter variant of /search, optimized for prefix or partial matches .
+
+    POST /similar/[productid]: Lighter variant of /search, optimized for prefix or partial matches with faster heuristics.
+
+    GET /doc/[productid]: Retrieve full document (good for click-through from search results).
+
+    GET /health: For health checks and monitoring.
+
+    POST /query-explain: Debug endpoint to show how query was interpreted (embeddings, terms used, etc.)
+
+    POST /feedback: Log user actions for learning-to-rank or query tuning
+
+   DELETE /remove/product/[productid]
+   DELETE /remove/proudcts/all
+
+
+
+Some relevant shared AI chats:
+*https://chatgpt.com/share/67f25f5d-ff48-8000-a0d6-0acd3abcaafd
+*Naive recommender system in MongoDb: https://claude.ai/share/950591ec-4703-4dc5-bed8-077f743f9121
+
+I am open for extending the project with more functionality based on successfull v1.
