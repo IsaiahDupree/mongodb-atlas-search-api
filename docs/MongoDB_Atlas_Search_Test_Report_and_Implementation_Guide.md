@@ -305,7 +305,7 @@ The system can be deployed on any of the following cloud providers:
    uvicorn main:app --host 0.0.0.0 --port 8000
    ```
 
-## Data Processing Pipeline
+## Data Processing Components
 
 The data processing pipeline consists of four main components:
 
