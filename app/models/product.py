@@ -109,3 +109,54 @@ class SearchResult(BaseModel):
     products: List[Product]
     facets: Optional[List[FacetResult]] = None
     query_explanation: Optional[Dict[str, Any]] = None
+
+
+class CategoryResult(BaseModel):
+    """
+    Category result model for consolidated search
+    """
+    id: str
+    name: str
+    slug: str
+    productCount: int = 0
+
+
+class BrandResult(BaseModel):
+    """
+    Brand result model for consolidated search
+    """
+    id: str
+    name: str
+    productCount: int = 0
+
+
+class ConsolidatedSearchRequest(BaseModel):
+    """
+    Request model for consolidated search endpoint
+    """
+    query: str
+    maxCategories: int = 10
+    maxBrands: int = 10
+    maxProducts: int = 20
+    includeVectorSearch: bool = True
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "query": "metaldetector",
+                "maxCategories": 5,
+                "maxBrands": 5,
+                "maxProducts": 15,
+                "includeVectorSearch": True
+            }
+        }
+
+
+class ConsolidatedSearchResponse(BaseModel):
+    """
+    Response model for consolidated search endpoint
+    """
+    categories: List[CategoryResult]
+    brands: List[BrandResult]
+    products: List[Dict[str, Any]]  # Using Dict for flexibility with matchType field
+    metadata: Dict[str, Any]

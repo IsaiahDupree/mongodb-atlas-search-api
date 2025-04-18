@@ -3,10 +3,15 @@ from fastapi import APIRouter, HTTPException, status, Body, Request
 from typing import List, Dict, Any, Optional
 import json
 import time
+import asyncio
 
-from models.product import ProductSearchQuery, AutosuggestQuery, SearchResult, FacetResult
+from models.product import (
+    ProductSearchQuery, AutosuggestQuery, SearchResult, FacetResult,
+    ConsolidatedSearchRequest, ConsolidatedSearchResponse, 
+    CategoryResult, BrandResult
+)
 from models.order import RecommendationQuery
-from database.mongodb import get_product_collection
+from database.mongodb import get_product_collection, get_database
 from services.embedding import embedding_service
 from services.cache import search_cache, product_cache, recommendations_cache
 from services.monitoring import SearchMetrics
@@ -289,3 +294,305 @@ async def log_feedback(feedback: Dict[str, Any] = Body(...)):
     print(f"Search feedback received: {json.dumps(feedback)}")
     
     return {"status": "feedback received"}
+
+
+@router.post("/consolidated-search", response_model=ConsolidatedSearchResponse)
+async def consolidated_search(request: Request, query: ConsolidatedSearchRequest = Body(...)):
+    """
+    Consolidated search endpoint that returns categories, brands, and products in a single response.
+    This is ideal for unified search experiences where different result types are displayed together.
+    
+    - Categories: Exact substring matches
+    - Brands: Exact substring matches
+    - Products: Combination of exact, ngram, and vector search
+    """
+    # Validate minimum query length
+    if len(query.query) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Search query must be at least 3 characters long"
+        )
+    
+    # Check cache first
+    cache_key = query.dict()
+    cached_result = search_cache.get(cache_key)
+    if cached_result:
+        return cached_result
+    
+    # Start timing for performance monitoring
+    start_time = time.time()
+    
+    # Get database collection
+    collection = await get_product_collection()
+    db = await get_database()
+    
+    # Generate embeddings for vector search if needed (for multi-word queries)
+    embeddings = None
+    if query.includeVectorSearch and " " in query.query:
+        embeddings = embedding_service.generate_embedding(query.query)
+    
+    # Execute parallel searches for each result type
+    categories_task = search_categories(db, collection, query.query, query.maxCategories)
+    brands_task = search_brands(db, collection, query.query, query.maxBrands)
+    products_task = search_products_consolidated(
+        db, 
+        collection, 
+        query.query, 
+        embeddings, 
+        query.maxProducts,
+        query.includeVectorSearch
+    )
+    
+    # Wait for all searches to complete concurrently
+    categories, brands, products = await asyncio.gather(
+        categories_task, 
+        brands_task, 
+        products_task
+    )
+    
+    # Calculate processing time
+    processing_time = (time.time() - start_time) * 1000
+    
+    # Compile response
+    response = ConsolidatedSearchResponse(
+        categories=categories,
+        brands=brands,
+        products=products,
+        metadata={
+            "totalResults": len(categories) + len(brands) + len(products),
+            "processingTimeMs": processing_time,
+            "query": query.query
+        }
+    )
+    
+    # Cache the result
+    search_cache.set(cache_key, response.dict())
+    
+    # Record processing time for monitoring
+    request.state.processing_time = processing_time
+    
+    return response
+
+
+async def search_categories(db, collection, query_text: str, max_results: int) -> List[CategoryResult]:
+    """
+    Search for categories with exact substring matches
+    """
+    # Extract unique categories from the product collection
+    # MongoDB doesn't have a built-in categories collection, so we need to query products
+    # and extract unique categories
+    try:
+        # This is a simplified approach - in a real application, you might have a separate categories collection
+        pipeline = [
+            # Find products where category name or slug contains the query (case insensitive)
+            {
+                "$match": {
+                    "$or": [
+                        {"categories.name": {"$regex": query_text, "$options": "i"}},
+                        {"categories.slug": {"$regex": query_text, "$options": "i"}}
+                    ]
+                }
+            },
+            # Unwind categories array to work with individual categories
+            {"$unwind": "$categories"},
+            # Filter to only include categories that match the query
+            {
+                "$match": {
+                    "$or": [
+                        {"categories.name": {"$regex": query_text, "$options": "i"}},
+                        {"categories.slug": {"$regex": query_text, "$options": "i"}}
+                    ]
+                }
+            },
+            # Group by category id to get unique categories and count products
+            {
+                "$group": {
+                    "_id": "$categories.id",
+                    "name": {"$first": "$categories.name"},
+                    "slug": {"$first": "$categories.slug"},
+                    "productCount": {"$sum": 1}
+                }
+            },
+            # Sort by product count (most popular categories first)
+            {"$sort": {"productCount": -1}},
+            # Limit to max_results
+            {"$limit": max_results},
+            # Project to final format
+            {
+                "$project": {
+                    "_id": 0,
+                    "id": "$_id",
+                    "name": 1,
+                    "slug": 1,
+                    "productCount": 1
+                }
+            }
+        ]
+        
+        # Execute the pipeline
+        cursor = collection.aggregate(pipeline)
+        results = await cursor.to_list(length=max_results)
+        
+        # Convert to CategoryResult objects
+        return [CategoryResult(**result) for result in results]
+    except Exception as e:
+        print(f"Error searching categories: {str(e)}")
+        # Return empty list on error rather than failing the whole response
+        return []
+
+
+async def search_brands(db, collection, query_text: str, max_results: int) -> List[BrandResult]:
+    """
+    Search for brands with exact substring matches
+    """
+    try:
+        # Find brands that match the query
+        pipeline = [
+            # Match products where brand contains the query (case insensitive)
+            {"$match": {"brand": {"$regex": query_text, "$options": "i"}}},
+            # Group by brand to get unique brands and count products
+            {
+                "$group": {
+                    "_id": "$brand",
+                    "productCount": {"$sum": 1}
+                }
+            },
+            # Sort by product count (most popular brands first)
+            {"$sort": {"productCount": -1}},
+            # Limit to max_results
+            {"$limit": max_results},
+            # Project to final format
+            {
+                "$project": {
+                    "_id": 0,
+                    "id": "$_id",  # Use brand name as ID
+                    "name": "$_id",
+                    "productCount": 1
+                }
+            }
+        ]
+        
+        # Execute the pipeline
+        cursor = collection.aggregate(pipeline)
+        results = await cursor.to_list(length=max_results)
+        
+        # Convert to BrandResult objects
+        return [BrandResult(**result) for result in results]
+    except Exception as e:
+        print(f"Error searching brands: {str(e)}")
+        # Return empty list on error rather than failing the whole response
+        return []
+
+
+async def search_products_consolidated(db, collection, query_text: str, embeddings: List[float], 
+                                       max_results: int, include_vector_search: bool) -> List[Dict[str, Any]]:
+    """
+    Search for products using multiple strategies:
+    1. Exact matching
+    2. Substring matching
+    3. Ngram matching
+    4. Vector search (if enabled and query has multiple words)
+    """
+    try:
+        # Build MongoDB Atlas search pipeline with multiple strategies
+        search_stage = {
+            "$search": {
+                "index": "product_search",  # Atlas Search index
+                "compound": {
+                    "should": [
+                        # Exact match (highest boost)
+                        {
+                            "text": {
+                                "query": query_text,
+                                "path": ["title", "description", "brand"],
+                                "score": {"boost": {"value": 5}}
+                            }
+                        },
+                        # Substring/fuzzy match
+                        {
+                            "text": {
+                                "query": query_text,
+                                "path": "title",
+                                "fuzzy": {"maxEdits": 1},
+                                "score": {"boost": {"value": 3}}
+                            }
+                        },
+                        # Ngram match for partial words
+                        {
+                            "autocomplete": {
+                                "query": query_text,
+                                "path": "title",
+                                "tokenOrder": "any",
+                                "score": {"boost": {"value": 2}}
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        
+        # Add vector search if enabled and we have embeddings
+        if include_vector_search and embeddings and " " in query_text:
+            vector_stage = {
+                "knnBeta": {
+                    "vector": embeddings,
+                    "path": "title_embedding",
+                    "k": 50,
+                    "score": {"boost": {"value": 1}}
+                }
+            }
+            search_stage["$search"]["compound"]["should"].append(vector_stage)
+        
+        # Build the full pipeline
+        pipeline = [
+            search_stage,
+            # Add a stage to determine match type
+            {
+                "$addFields": {
+                    "score": {"$meta": "searchScore"},
+                    "matchType": {
+                        "$cond": [
+                            # Check if title contains exact query (case insensitive)
+                            {"$regexMatch": {"input": "$title", "regex": query_text, "options": "i"}},
+                            "exact",
+                            # Check score to determine if it's ngram or vector match
+                            {
+                                "$cond": [
+                                    {"$gt": [{"$meta": "searchScore"}, 1.5]},
+                                    "ngram",
+                                    "vector"
+                                ]
+                            }
+                        ]
+                    }
+                }
+            },
+            # Limit to max_results
+            {"$limit": max_results},
+            # Project only needed fields
+            {
+                "$project": {
+                    "_id": 0,
+                    "id": 1,
+                    "title": 1,
+                    "description": 1,
+                    "brand": 1,
+                    "imageThumbnailUrl": 1,
+                    "priceOriginal": 1,
+                    "priceCurrent": 1,
+                    "isOnSale": 1,
+                    "score": 1,
+                    "matchType": 1
+                }
+            }
+        ]
+        
+        # Execute the pipeline
+        cursor = collection.aggregate(pipeline)
+        results = await cursor.to_list(length=max_results)
+        
+        return results
+    except Exception as e:
+        print(f"Error searching products: {str(e)}")
+        # Return empty list on error rather than failing the whole response
+        return []
